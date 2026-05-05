@@ -98,79 +98,48 @@ class BiologyQASystem:
 
         return unique_esm
 
+    def _short_function(self, text, limit=160):
+        if not text:
+            return ""
+        text = str(text).replace("\n", " ").strip()
+        if len(text) > limit:
+            text = text[:limit].rsplit(" ", 1)[0] + "..."
+        return text
+
     def format_direct_evidence(self, direct_results):
-        evidence = ""
-
-        for i, protein in enumerate(direct_results, start=1):
-            evidence += f"""
-Direct Match {i}
-Accession: {protein.get('accession', '')}
-Protein Name: {protein.get('protein_name', '')}
-Gene: {protein.get('gene_name', '')}
-Organism: {protein.get('organism', '')}
-Function: {protein.get('function', '')}
-Text Retrieval Score: {protein.get('text_score', 'N/A')}
-"""
-
-        return evidence
+        lines = []
+        for protein in direct_results:
+            gene = protein.get("gene_name", "") or ""
+            name = protein.get("protein_name", "") or ""
+            func = self._short_function(protein.get("function", ""))
+            lines.append(f"- {gene} ({name}): {func}")
+        return "\n".join(lines)
 
     def format_esm_evidence(self, esm_results):
-        evidence = ""
-
-        for i, protein in enumerate(esm_results, start=1):
-            evidence += f"""
-ESM Candidate {i}
-Accession: {protein.get('accession', '')}
-Protein Name: {protein.get('protein_name', '')}
-Gene: {protein.get('gene_name', '')}
-Organism: {protein.get('organism', '')}
-Function: {protein.get('function', '')}
-ESM Similarity Score: {protein.get('esm_score', 'N/A')}
-Similar To: {protein.get('similar_to_name', '')}
-Similar To Gene: {protein.get('similar_to_gene', '')}
-Similar To Accession: {protein.get('similar_to_accession', '')}
-"""
-
-        return evidence
+        lines = []
+        for protein in esm_results:
+            gene = protein.get("gene_name", "") or ""
+            name = protein.get("protein_name", "") or ""
+            func = self._short_function(protein.get("function", ""))
+            seed = protein.get("similar_to_gene") or protein.get("similar_to_name", "")
+            lines.append(f"- {gene} ({name}) [similar to {seed}]: {func}")
+        return "\n".join(lines)
 
     def generate_answer(self, question, direct_results, esm_results):
         direct_evidence = self.format_direct_evidence(direct_results)
         esm_evidence = self.format_esm_evidence(esm_results)
 
-        prompt = f"""
-You are a biology question-answering assistant.
+        prompt = f"""Answer the biology question using only the proteins listed below.
 
-The user is asking:
-{question}
+Question: {question}
 
-You are given two types of retrieved proteins:
-
-1. DIRECT UNIPROT TEXT MATCHES:
-These proteins were retrieved from UniProt annotations using semantic text search.
-These are the strongest evidence for the user's requested function.
-
-2. ESM-2 SEQUENCE-SIMILAR CANDIDATES:
-These proteins were found because their amino acid sequences are similar to the direct UniProt matches.
-These may share related functions, but they should be described as possible candidates, not confirmed hits.
-
-Rules:
-- Separate the answer into two sections.
-- First list the proteins directly related to the requested function from UniProt annotations.
-- Then list additional possible related proteins found using ESM-2 sequence similarity.
-- Do not claim that ESM-2 candidates definitely have the function unless their UniProt function text also supports it.
-- For each direct UniProt match, explain why it matches the requested function.
-- For each ESM-2 candidate, say which seed protein it was similar to.
-- Be concise but specific.
-- Use only the provided evidence.
-- If evidence is weak, say so.
-
-DIRECT UNIPROT TEXT MATCHES:
+Direct UniProt matches (strong evidence):
 {direct_evidence}
 
-ESM-2 SEQUENCE-SIMILAR CANDIDATES:
+ESM-2 sequence-similar candidates (possible related proteins):
 {esm_evidence}
 
-Final answer:
+Write two short sections: "Direct matches" and "Possible related (ESM-2)". For each protein, give one sentence on why it fits the question. Be concise. Use only the proteins above.
 """
 
         response = ollama.chat(
@@ -182,14 +151,22 @@ Final answer:
 
         return response["message"]["content"]
 
-    def ask(self, question, text_top_k=5, esm_top_k_per_seed=3):
+    def retrieve(
+        self,
+        question,
+        text_top_k=30,
+        esm_top_k_per_seed=1,
+        esm_seed_count=5,
+    ):
         direct_results = self.retrieve_text(
             question,
             top_k=text_top_k
         )
 
+        esm_seeds = direct_results[:esm_seed_count]
+
         esm_results = self.retrieve_esm_candidates(
-            direct_results,
+            esm_seeds,
             top_k_per_seed=esm_top_k_per_seed
         )
 
@@ -198,15 +175,29 @@ Final answer:
             esm_results
         )
 
-        answer = self.generate_answer(
-            question,
-            direct_results,
-            esm_results
-        )
-
-        all_results = {
+        return {
             "direct_uniprot_matches": direct_results,
             "esm_sequence_candidates": esm_results
         }
+
+    def ask(
+        self,
+        question,
+        text_top_k=30,
+        esm_top_k_per_seed=1,
+        esm_seed_count=5,
+    ):
+        all_results = self.retrieve(
+            question,
+            text_top_k=text_top_k,
+            esm_top_k_per_seed=esm_top_k_per_seed,
+            esm_seed_count=esm_seed_count,
+        )
+
+        answer = self.generate_answer(
+            question,
+            all_results["direct_uniprot_matches"],
+            all_results["esm_sequence_candidates"]
+        )
 
         return answer, all_results
